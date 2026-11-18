@@ -1,15 +1,19 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert
 from database import engine, get_db
-from sqlalchemy import select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session, aliased
 from schema import TokenResponse, UserCreate, UserLogin, UserRead
 from models.user import User
 from security import create_access_token, hash_password, read_access_token, verify_password
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+import secrets
+from models import Group, GroupMembership
+from schema import GroupCreate, GroupCreated, GroupListItem, GroupJoin, GroupDetail
 
 app = FastAPI(title="StudyBuddy API")
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -112,3 +116,190 @@ def get_current_user(
 @app.get("/me", response_model=UserRead)
 def me(user: User = Depends(get_current_user)):
     return {"id": user.id, "name": user.name, "email": user.email}
+
+@app.post("/groups", response_model=GroupCreated, status_code=201)
+def create_group(
+    data: GroupCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = Group(
+        name=data.name,
+        description=data.description,
+        invite_code=secrets.token_urlsafe(12),
+    )
+
+    try:
+        db.add(group)
+        db.flush()
+
+        owner = GroupMembership(
+            group_id=group.id,
+            user_id=user.id,
+            role="owner",
+        )
+        db.add(owner)
+
+        result = GroupCreated(
+            id=group.id,
+            name=group.name,
+            description=group.description,
+            invite_code=group.invite_code,
+            member_count=1,
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if exc.orig.diag.constraint_name == "groups_invite_code_key":
+            raise HTTPException(
+                status_code=503,
+                detail="Не удалось подобрать код приглашения. Повтори создание группы.",
+            ) from exc
+        raise
+
+    return result
+
+@app.get("/groups", response_model=list[GroupListItem])
+def list_my_groups(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    my_group_ids = select(GroupMembership.group_id).where(
+        GroupMembership.user_id == user.id
+    )
+
+    query = (
+        select(
+            Group.id,
+            Group.name,
+            Group.description,
+            func.count(GroupMembership.user_id).label("member_count"),
+        )
+        .join(GroupMembership, GroupMembership.group_id == Group.id)
+        .where(Group.id.in_(my_group_ids))
+        .group_by(Group.id, Group.name, Group.description)
+        .order_by(Group.id)
+    )
+
+    return db.execute(query).mappings().all()
+
+@app.post("/groups/join", status_code=201)
+def join_group(
+    data: GroupJoin,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, int]:
+    group_query = select(Group.id).where(Group.invite_code == data.invite_code)
+    group_id = db.execute(group_query).scalar_one_or_none()
+
+    if group_id is None:
+        raise HTTPException(status_code=404, detail="Группа с таким кодом не найдена")
+
+    join_query = (
+        insert(GroupMembership)
+        .values(group_id=group_id, user_id=user.id, role="member")
+        .on_conflict_do_nothing(index_elements=["group_id", "user_id"])
+        .returning(GroupMembership.group_id)
+    )
+    joined_group_id = db.execute(join_query).scalar_one_or_none()
+
+    if joined_group_id is None:
+        raise HTTPException(status_code=409, detail="Ты уже состоишь в этой группе")
+
+    db.commit()
+    return {"group_id": joined_group_id}
+
+@app.get("/groups/{group_id}", response_model=GroupDetail)
+def get_group_detail(
+    group_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    my_membership = aliased(GroupMembership)
+
+    query = (
+        select(
+            Group.id,
+            Group.name,
+            Group.description,
+            func.count(GroupMembership.user_id).label("member_count"),
+            my_membership.role.label("my_role"),
+        )
+        .select_from(Group)
+        .join(GroupMembership, GroupMembership.group_id == Group.id)
+        .join(my_membership, my_membership.group_id == Group.id)
+        .where(Group.id == group_id, my_membership.user_id == user.id)
+        .group_by(Group.id, Group.name, Group.description, my_membership.role)
+    )
+
+    group = db.execute(query).mappings().one_or_none()
+    if group is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    return group
+
+@app.delete("/groups/{group_id}/membership", status_code=204, response_class=Response)
+def leave_group(
+    group_id: int,
+    new_owner_id: int | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = db.get(Group, group_id, with_for_update=True)
+    membership = db.get(GroupMembership, (group_id, user.id))
+
+    if group is None or membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    if membership.role == "owner":
+        if new_owner_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Чтобы выйти, выбери нового владельца из участников группы",
+            )
+
+        successor = db.get(GroupMembership, (group_id, new_owner_id))
+        if successor is None or successor.role != "member":
+            raise HTTPException(
+                status_code=422,
+                detail="Выбери другого участника этой группы",
+            )
+
+        successor.role = "owner"
+
+    elif new_owner_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Только владелец может передать права",
+        )
+
+    db.delete(membership)
+    db.commit()
+    return Response(status_code=204)
+
+@app.delete("/groups/{group_id}/members/{user_id}", status_code=204, response_class=Response)
+def remove_group_member(
+    group_id: int,
+    user_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = db.get(Group, group_id, with_for_update=True)
+    my_membership = db.get(GroupMembership, (group_id, user.id))
+
+    if group is None or my_membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    if my_membership.role != "owner":
+        raise HTTPException(status_code=403, detail="Только владелец может удалять участников")
+
+    if user_id == user.id:
+        raise HTTPException(status_code=409, detail="Для выхода передай права новому владельцу")
+
+    target = db.get(GroupMembership, (group_id, user_id))
+    if target is None:
+        raise HTTPException(status_code=404, detail="Участник не найден в группе")
+
+    db.delete(target)
+    db.commit()
+    return Response(status_code=204)
