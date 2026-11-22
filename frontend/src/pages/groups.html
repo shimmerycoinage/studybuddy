@@ -21,10 +21,6 @@
         <p>Страница групп (заглушка). Здесь будет список групп.</p>
         <p>Вы успешно авторизованы!</p>
       </main>
-      <script type="module">
-        import { requireAuth, logout } from '../utils/auth.js';
-        requireAuth();
-        document.getElementById('logout-btn').addEventListener('click', logout);
-    </script>
+      <script type="module" src="/src/pages/groups.js"></script>
   </body>
 </html>
