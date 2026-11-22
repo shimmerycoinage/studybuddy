@@ -8,12 +8,23 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/src/styles/style.css" />
+    <link rel="stylesheet" href="/src/styles/auth.css" />
   </head>
   <body>
-    <h1>Группы</h1>
-    <p>Страница групп (заглушка)</p>
-    <a href="/">На главную</a> |
-    <a href="/pages/login.html">Вход</a> |
-    <a href="/pages/register.html">Регистрация</a>
+    <main class="auth-container" style="max-width: 800px;">
+        <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h1 style="margin: 0;">Мои группы</h1>
+            <button id="logout-btn" class="btn btn-outline" style="height: 36px; padding: 0 16px; font-size: 14px;">
+              Выйти
+            </button>
+        </header>       
+        <p>Страница групп (заглушка). Здесь будет список групп.</p>
+        <p>Вы успешно авторизованы!</p>
+      </main>
+      <script type="module">
+        import { requireAuth, logout } from '../utils/auth.js';
+        requireAuth();
+        document.getElementById('logout-btn').addEventListener('click', logout);
+    </script>
   </body>
 </html>
