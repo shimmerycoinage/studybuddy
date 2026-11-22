@@ -8,12 +8,66 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/src/styles/style.css" />
+    <link rel="stylesheet" href="/src/styles/auth.css" />
   </head>
   <body>
-    <h1>Регистрация</h1>
-    <p>Страница регистрации (заглушка)</p>
-    <a href="/">На главную</a> |
-    <a href="/pages/login.html">Вход</a> |
-    <a href="/pages/groups.html">Группы</a>
+    <main class="auth-container">
+      <h1>Регистрация в StudyBuddy</h1>    
+      <div id="form-error" class="form-error" role="alert" hidden></div>
+      <form id="register-form" novalidate>
+        <div class="form-group">
+          <label for="reg-name" class="visually-hidden">Имя</label>
+          <input 
+            type="text" 
+            id="reg-name" 
+            name="name" 
+            placeholder="Имя" 
+            required 
+            minlength="1"
+            autocomplete="name"
+            aria-invalid="false"
+            aria-describedby="reg-name-error"
+          />
+          <span id="reg-name-error" class="field-error" role="alert"></span>
+        </div>
+        <div class="form-group">
+          <label for="reg-email" class="visually-hidden">Email</label>
+          <input 
+            type="email" 
+            id="reg-email" 
+            name="email" 
+            placeholder="Email" 
+            required 
+            autocomplete="email"
+            aria-invalid="false"
+            aria-describedby="reg-email-error"
+          />
+          <span id="reg-email-error" class="field-error" role="alert"></span>
+        </div>
+        <div class="form-group">
+          <label for="reg-password" class="visually-hidden">Пароль (минимум 8 символов)</label>
+          <input 
+            type="password" 
+            id="reg-password" 
+            name="password" 
+            placeholder="Пароль (мин. 8 символов)" 
+            required 
+            minlength="8"
+            autocomplete="new-password"
+            aria-invalid="false"
+            aria-describedby="reg-password-error"
+          />
+          <span id="reg-password-error" class="field-error" role="alert"></span>
+        </div>
+        <button type="submit" id="register-submit-btn" class="btn btn-primary">
+          <span class="btn-text">Зарегистрироваться</span>
+          <span class="btn-loader" hidden>Загрузка...</span>
+        </button>
+      </form>
+      <p class="auth-footer">
+        Уже есть аккаунт? <a href="/src/pages/login.html">Войти</a>
+      </p>
+    </main>
+    <script type="module" src="/src/pages/register.js"></script>
   </body>
 </html>
