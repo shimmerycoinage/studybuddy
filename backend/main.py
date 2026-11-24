@@ -14,8 +14,16 @@ from fastapi.responses import JSONResponse
 import secrets
 from models import Group, GroupMembership
 from schema import GroupCreate, GroupCreated, GroupListItem, GroupJoin, GroupDetail
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="StudyBuddy API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 @app.exception_handler(RequestValidationError)

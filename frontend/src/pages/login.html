@@ -8,12 +8,51 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/src/styles/style.css" />
+    <link rel="stylesheet" href="/src/styles/auth.css" />
   </head>
   <body>
-    <h1>Вход</h1>
-    <p>Страница входа (заглушка)</p>
-    <a href="/">На главную</a> |
-    <a href="/pages/register.html">Регистрация</a> |
-    <a href="/pages/groups.html">Группы</a>
+    <main class="auth-container">
+      <h1>Вход в StudyBuddy</h1>
+      <div id="form-error" class="form-error" role="alert" hidden></div>
+      <form id="login-form" novalidate>
+        <div class="form-group">
+          <label for="login-email" class="visually-hidden">Email</label>
+          <input 
+            type="email" 
+            id="login-email" 
+            name="email" 
+            placeholder="Email" 
+            required 
+            autocomplete="email"
+            aria-invalid="false"
+            aria-describedby="login-email-error"
+          />
+          <span id="login-email-error" class="field-error" role="alert"></span>
+        </div>
+        <div class="form-group">
+          <label for="login-password" class="visually-hidden">Пароль</label>
+          <input 
+            type="password" 
+            id="login-password" 
+            name="password" 
+            placeholder="Пароль" 
+            required 
+            minlength="8"
+            autocomplete="current-password"
+            aria-invalid="false"
+            aria-describedby="login-password-error"
+          />
+          <span id="login-password-error" class="field-error" role="alert"></span>
+        </div>
+        <button type="submit" id="login-submit-btn" class="btn btn-primary">
+          <span class="btn-text">Войти</span>
+          <span class="btn-loader" hidden></span>
+        </button>
+      </form>
+      <p class="auth-footer">
+        Нет аккаунта? <a href="/src/pages/register.html">Зарегистрироваться</a>
+      </p>
+    </main>
+    <script type="module" src="/src/pages/login.js"></script>
   </body>
 </html>

@@ -34,6 +34,11 @@
   /* серая кнопка панели редактора */
   --color-tool-btn: #eef0f7;
 
+  --color-accent-hover: #33309a;
+  --color-accent-ring: rgba(63, 60, 187, 0.2);
+  --color-rust-bg: #fbe9e4;
+  --color-rust-ring: rgba(180, 71, 43, 0.2);
+
   /* Типографика */
   --font-family: 'Onest', system-ui, -apple-system, sans-serif;
 
