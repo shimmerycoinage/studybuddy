@@ -24,9 +24,13 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/studybuddy
       JWT_SECRET: ${JWT_SECRET}
+      MATERIALS_DIR: /data/materials
+    volumes:
+      - materials_data:/data/materials
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   postgres_data:
+  materials_data:
