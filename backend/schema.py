@@ -1,5 +1,7 @@
-from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime
 from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 class UserCreate(BaseModel):
     name: str = Field(min_length=1)
@@ -33,3 +35,29 @@ class GroupJoin(BaseModel):
     invite_code: str = Field(min_length=1)
 class GroupDetail(GroupListItem):
     my_role: Literal["owner", "member"]
+class QuestionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(min_length=1, pattern=r"\S")
+class QuestionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    group_id: int
+    author_id: int
+    body: str
+    is_resolved: bool
+    created_at: datetime
+class AnswerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(min_length=1, pattern=r"\S")
+
+
+class AnswerRead(BaseModel):
+    id: int
+    question_id: int
+    body: str
+    author_id: int
+    author_name: str | None
+    created_at: datetime
