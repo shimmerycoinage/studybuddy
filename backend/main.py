@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Query, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.exc import IntegrityError
@@ -20,14 +20,22 @@ from schema import (
     QuestionRead,
     AnswerCreate,
     AnswerRead,
+    MaterialRead,
+    MaterialListItem,
 )
-from models import Answer, Group, GroupMembership, Question, User
+from models import Answer, Group, GroupMembership, Material, Question, User
 from security import create_access_token, hash_password, read_access_token, verify_password
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 import secrets
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Literal
+import os
+from pathlib import Path
+from shutil import copyfileobj
+from tempfile import NamedTemporaryFile
+
+from material_files import check_material_file
 
 app = FastAPI(title="StudyBuddy API")
 app.add_middleware(
@@ -471,3 +479,159 @@ def resolve_question(
     db.commit()
     db.refresh(question)
     return question
+
+@app.post("/groups/{group_id}/materials", status_code=201, response_model=MaterialRead)
+def upload_material(
+    group_id: int,
+    file: UploadFile,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = db.get(Group, group_id, with_for_update={"read": True})
+    membership = db.get(GroupMembership, (group_id, user.id))
+    if group is None or membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    original_name, size = check_material_file(file)
+
+    stored_file = NamedTemporaryFile(dir=os.environ["MATERIALS_DIR"], delete=False)
+    stored_path = Path(stored_file.name)
+
+    try:
+        with stored_file:
+            copyfileobj(file.file, stored_file)
+
+        material = Material(
+            group_id=group_id,
+            author_id=user.id,
+            original_name=original_name,
+            storage_key=stored_path.name,
+            size_bytes=size,
+        )
+        db.add(material)
+        db.flush()
+        result = MaterialRead.model_validate(material)
+        db.commit()
+    except Exception:
+        db.rollback()
+        stored_path.unlink(missing_ok=True)
+        raise
+
+    return result
+
+@app.get("/groups/{group_id}/materials", response_model=list[MaterialListItem])
+def list_group_materials(
+    group_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    membership = db.get(GroupMembership, (group_id, user.id), with_for_update={"read": True})
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    query = (
+        select(
+            Material.id,
+            Material.group_id,
+            Material.author_id,
+            Material.original_name,
+            Material.size_bytes,
+            Material.created_at,
+            User.name.label("author_name"),
+        )
+        .select_from(Material)
+        .join(User, User.id == Material.author_id)
+        .where(Material.group_id == group_id, Material.delete_pending.is_(False))
+        .order_by(Material.created_at.desc(), Material.id.desc())
+    )
+    return db.execute(query).mappings().all()
+
+@app.get(
+    "/materials/{material_id}/download",
+    response_class=FileResponse,
+    responses={
+        200: {
+            "content": {
+                "application/octet-stream": {
+                    "schema": {"type": "string", "format": "binary"}
+                }
+            }
+        }
+    },
+)
+def download_material(
+    material_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(Material)
+        .join(GroupMembership, GroupMembership.group_id == Material.group_id)
+        .where(
+            Material.id == material_id,
+            GroupMembership.user_id == user.id,
+            Material.delete_pending.is_(False),
+        )
+    )
+    material = db.scalar(query)
+
+    if material is None:
+        raise HTTPException(status_code=404, detail="Материал не найден")
+
+    materials_dir = Path(os.environ["MATERIALS_DIR"]).resolve()
+    stored_path = (materials_dir / material.storage_key).resolve()
+
+    if stored_path.parent != materials_dir or not stored_path.is_file():
+        raise HTTPException(status_code=404, detail="Файл не найден")
+
+    return FileResponse(
+        path=stored_path,
+        filename=material.original_name,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+@app.delete("/materials/{material_id}", status_code=204, response_class=Response)
+def delete_material(
+    material_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = (
+        select(Material)
+        .join(GroupMembership, GroupMembership.group_id == Material.group_id)
+        .where(Material.id == material_id, GroupMembership.user_id == user.id)
+        .with_for_update()
+    )
+    material = db.scalar(query)
+
+    if material is None:
+        raise HTTPException(status_code=404, detail="Материал не найден")
+
+    if material.author_id != user.id:
+        raise HTTPException(status_code=403, detail="Удалить материал может только автор")
+
+    material.delete_pending = True
+    db.commit()
+
+    with db.begin():
+        material = db.scalar(
+            select(Material).where(Material.id == material_id).with_for_update()
+        )
+        if material is not None:
+            key = material.storage_key
+            if not key or Path(key).name != key or key in {".", ".."}:
+                raise HTTPException(status_code=500, detail="Некорректное имя файла в хранилище")
+
+            try:
+                directory = Path(os.environ["MATERIALS_DIR"]).resolve(strict=True)
+                (directory / key).unlink(missing_ok=True)
+            except OSError as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Хранилище недоступно. Повтори удаление позже",
+                ) from error
+
+            db.delete(material)
+
+    return Response(status_code=204)
