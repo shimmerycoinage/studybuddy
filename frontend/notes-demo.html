@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <title>Проверка конспекта StudyBuddy</title>
+</head>
+<body>
+    <h1>Совместный конспект</h1>
+    <p id="status">Подключаемся…</p>
+    <p id="save-status" role="status"></p>
+
+    <form id="entry-form">
+        <label for="entry">Новая строка</label>
+        <input id="entry" autocomplete="off">
+        <button id="add" disabled>Добавить строку</button>
+    </form>
+
+    <h2>Текст конспекта</h2>
+    <pre id="content"></pre>
+
+    <script type="module">
+        import * as Y from "yjs";
+
+        const status = document.querySelector("#status");
+        const form = document.querySelector("#entry-form");
+        const entry = document.querySelector("#entry");
+        const add = document.querySelector("#add");
+        const content = document.querySelector("#content");
+
+        function connect() {
+            const token = localStorage.getItem("access_token");
+            if (!token) {
+                status.textContent = "Сначала войдите в StudyBuddy через страницу входа.";
+                return;
+            }
+
+            const noteId = new URLSearchParams(location.search).get("note") || "1";
+            const doc = new Y.Doc();
+            const body = doc.getText("body");
+
+            const socket = new WebSocket(
+                `ws://localhost:8000/ws/notes/${encodeURIComponent(noteId)}`,
+                ["studybuddy-notes-v1", token]
+            );
+            socket.binaryType = "arraybuffer";
+
+            body.observe(() => {
+                content.textContent = body.toString();
+            });
+
+            const saveStatus = document.querySelector("#save-status");
+            let pending = 0;
+
+            doc.on("update", (update, origin) => {
+                if (origin !== socket && socket.readyState === WebSocket.OPEN) {
+                    pending += 1;
+                    saveStatus.textContent = "Сохраняем…";
+                    socket.send(update);
+                }
+            });
+
+            socket.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    Y.applyUpdate(doc, new Uint8Array(event.data), socket);
+                    return;
+                }
+
+                if (event.data === "pong") return;
+
+                const message = JSON.parse(event.data);
+
+                if (message.type === "ready") {
+                    status.textContent =
+                        `Подключено. Конспект №${message.note_id}, пользователь №${message.user_id}`;
+                    socket.send("sync");
+                } else if (message.type === "synced") {
+                    add.disabled = false;
+                    saveStatus.textContent = "Конспект загружен из базы.";
+                } else if (message.type === "saved") {
+                    pending -= 1;
+                    if (pending === 0) {
+                        saveStatus.textContent = "Сохранено в PostgreSQL.";
+                    }
+                }
+            };
+
+            form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                const line = entry.value.trim();
+                if (!line || add.disabled || socket.readyState !== WebSocket.OPEN) return;
+
+                body.insert(body.length, line + "\n");
+                entry.value = "";
+                entry.focus();
+            });
+
+            socket.onclose = (event) => {
+                add.disabled = true;
+                status.textContent = `Соединение закрыто. Код ${event.code}`;
+                if (pending > 0) {
+                    saveStatus.textContent = "Сохранение последних правок не подтверждено.";
+                }
+            };
+        }
+
+        connect();
+    </script>
+</body>
+</html>
