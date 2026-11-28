@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Response
+from fastapi import FastAPI, Depends, HTTPException, Query, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.exc import IntegrityError
@@ -6,15 +6,28 @@ from sqlalchemy.dialects.postgresql import insert
 from database import engine, get_db
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, aliased
-from schema import TokenResponse, UserCreate, UserLogin, UserRead
-from models.user import User
+from schema import (
+    TokenResponse,
+    UserCreate,
+    UserLogin,
+    UserRead,
+    GroupCreate,
+    GroupCreated,
+    GroupListItem,
+    GroupJoin,
+    GroupDetail,
+    QuestionCreate,
+    QuestionRead,
+    AnswerCreate,
+    AnswerRead,
+)
+from models import Answer, Group, GroupMembership, Question, User
 from security import create_access_token, hash_password, read_access_token, verify_password
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import secrets
-from models import Group, GroupMembership
-from schema import GroupCreate, GroupCreated, GroupListItem, GroupJoin, GroupDetail
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Literal
 
 app = FastAPI(title="StudyBuddy API")
 app.add_middleware(
@@ -311,3 +324,150 @@ def remove_group_member(
     db.delete(target)
     db.commit()
     return Response(status_code=204)
+
+@app.post("/groups/{group_id}/questions", status_code=201, response_model=QuestionRead)
+def create_question(
+    group_id: int,
+    data: QuestionCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = db.get(Group, group_id, with_for_update=True)
+    membership = db.get(GroupMembership, (group_id, user.id))
+
+    if group is None or membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    question = Question(
+        group_id=group_id,
+        author_id=user.id,
+        body=data.body,
+    )
+
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
+@app.get("/groups/{group_id}/questions", response_model=list[QuestionRead])
+def list_group_questions(
+    group_id: int,
+    status: Literal["all", "unanswered", "resolved"] = "all",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    membership = db.get(GroupMembership, (group_id, user.id))
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    query = select(Question).where(Question.group_id == group_id)
+
+    if status == "unanswered":
+        has_answer = (
+            select(Answer.id)
+            .where(Answer.question_id == Question.id)
+            .exists()
+        )
+        query = query.where(~has_answer)
+    elif status == "resolved":
+        query = query.where(Question.is_resolved.is_(True))
+
+    offset = (page - 1) * page_size
+    query = (
+        query.order_by(Question.created_at.desc(), Question.id.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+
+    return db.scalars(query).all()
+
+def get_accessible_question_id(question_id: int, user_id: int, db: Session, *, for_update: bool = False) -> int:
+    query = (
+        select(Question.id)
+        .join(GroupMembership, GroupMembership.group_id == Question.group_id)
+        .where(Question.id == question_id, GroupMembership.user_id == user_id)
+        .with_for_update(read=not for_update)
+    )
+    target_question_id = db.scalar(query)
+
+    if target_question_id is None:
+        raise HTTPException(status_code=404, detail="Вопрос не найден")
+
+    return target_question_id
+
+@app.post("/questions/{question_id}/answers", status_code=201, response_model=AnswerRead)
+def create_answer(
+    question_id: int,
+    data: AnswerCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target_question_id = get_accessible_question_id(question_id, user.id, db)
+
+    answer = Answer(
+        question_id=target_question_id,
+        author_id=user.id,
+        body=data.body,
+    )
+    db.add(answer)
+    db.flush()
+
+    result = AnswerRead(
+        id=answer.id,
+        question_id=answer.question_id,
+        body=answer.body,
+        author_id=answer.author_id,
+        author_name=user.name,
+        created_at=answer.created_at,
+    )
+    db.commit()
+    return result
+
+@app.get("/questions/{question_id}/answers", response_model=list[AnswerRead])
+def list_question_answers(
+    question_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target_question_id = get_accessible_question_id(question_id, user.id, db)
+
+    query = (
+        select(
+            Answer.id,
+            Answer.question_id,
+            Answer.body,
+            Answer.author_id,
+            User.name.label("author_name"),
+            Answer.created_at,
+        )
+        .select_from(Answer)
+        .join(User, User.id == Answer.author_id)
+        .where(Answer.question_id == target_question_id)
+        .order_by(Answer.created_at.asc(), Answer.id.asc())
+    )
+
+    return db.execute(query).mappings().all()
+
+@app.patch("/questions/{question_id}/resolve", response_model=QuestionRead)
+def resolve_question(
+    question_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target_question_id = get_accessible_question_id(
+        question_id, user.id, db, for_update=True
+    )
+    question = db.get(Question, target_question_id)
+
+    if question.author_id != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Только автор вопроса может отметить его решённым",
+        )
+
+    question.is_resolved = True
+    db.commit()
+    db.refresh(question)
+    return question
