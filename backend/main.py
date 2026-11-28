@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, UploadFile, WebSocket, WebSocketException, WebSocketDisconnect
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import InvalidTokenError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert
-from database import engine, get_db
+from database import SessionLocal, engine, get_db
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, aliased
 from schema import (
@@ -22,8 +22,10 @@ from schema import (
     AnswerRead,
     MaterialRead,
     MaterialListItem,
+    NoteCreate,
+    NoteRead,
 )
-from models import Answer, Group, GroupMembership, Material, Question, User
+from models import Answer, Group, GroupMembership, Material, Note, Question, User
 from security import create_access_token, hash_password, read_access_token, verify_password
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -34,8 +36,10 @@ import os
 from pathlib import Path
 from shutil import copyfileobj
 from tempfile import NamedTemporaryFile
+from starlette.concurrency import run_in_threadpool
 
 from material_files import check_material_file
+from note_storage import note_state
 
 app = FastAPI(title="StudyBuddy API")
 app.add_middleware(
@@ -635,3 +639,136 @@ def delete_material(
             db.delete(material)
 
     return Response(status_code=204)
+
+@app.post("/groups/{group_id}/notes", status_code=201, response_model=NoteRead)
+def create_note(
+    group_id: int,
+    data: NoteCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    group = db.get(Group, group_id, with_for_update={"read": True})
+    membership = db.get(GroupMembership, (group_id, user.id))
+
+    if group is None or membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    note = Note(
+        group_id=group_id,
+        author_id=user.id,
+        title=data.title,
+    )
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return note
+
+@app.get("/groups/{group_id}/notes", response_model=list[NoteRead])
+def list_group_notes(
+    group_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    membership = db.get(GroupMembership, (group_id, user.id), with_for_update={"read": True})
+    if membership is None:
+        raise HTTPException(status_code=404, detail="Группа не найдена")
+
+    query = (
+        select(Note.id, Note.group_id, Note.author_id, Note.title, Note.created_at)
+        .where(Note.group_id == group_id)
+        .order_by(Note.created_at.desc(), Note.id.desc())
+    )
+    return db.execute(query).mappings().all()
+
+NOTE_PROTOCOL = "studybuddy-notes-v1"
+
+
+def require_note_member(websocket: WebSocket, note_id: int) -> int:
+    protocols = websocket.scope["subprotocols"]
+    if len(protocols) != 2 or protocols[0] != NOTE_PROTOCOL:
+        raise WebSocketException(code=1008)
+
+    try:
+        user_id = read_access_token(protocols[1])
+    except (InvalidTokenError, ValueError):
+        raise WebSocketException(code=1008)
+
+    query = (
+        select(Note.id)
+        .join(GroupMembership, GroupMembership.group_id == Note.group_id)
+        .where(Note.id == note_id, GroupMembership.user_id == user_id)
+    )
+    with SessionLocal() as db:
+        if db.scalar(query) is None:
+            raise WebSocketException(code=1008)
+
+    return user_id
+
+note_clients: dict[int, set[WebSocket]] = {}
+
+
+async def broadcast_note(note_id: int, sender: WebSocket, message: str | bytes):
+    for peer in tuple(note_clients.get(note_id, ())):
+        if peer is sender:
+            continue
+
+        try:
+            await run_in_threadpool(require_note_member, peer, note_id)
+        except WebSocketException:
+            continue
+
+        try:
+            if isinstance(message, bytes):
+                await peer.send_bytes(message)
+            else:
+                await peer.send_text(message)
+        except (WebSocketDisconnect, OSError, RuntimeError):
+            continue
+
+
+@app.websocket("/ws/notes/{note_id}")
+async def note_socket(
+    websocket: WebSocket,
+    note_id: int,
+    user_id: int = Depends(require_note_member),
+):
+    await websocket.accept(subprotocol=NOTE_PROTOCOL)
+    peers = note_clients.setdefault(note_id, set())
+    peers.add(websocket)
+
+    try:
+        await websocket.send_json({"type": "ready", "note_id": note_id, "user_id": user_id})
+
+        while True:
+            event = await websocket.receive()
+
+            if event["type"] == "websocket.disconnect":
+                return
+
+            if event.get("text") == "ping":
+                await websocket.send_text("pong")
+                continue
+
+            await run_in_threadpool(require_note_member, websocket, note_id)
+
+            if event.get("text") == "sync":
+                state = await run_in_threadpool(note_state, note_id, user_id)
+                if state is not None:
+                    await websocket.send_bytes(state)
+                await websocket.send_json({"type": "synced"})
+
+            elif event.get("bytes") is not None:
+                update = event["bytes"]
+                await run_in_threadpool(note_state, note_id, user_id, update)
+                await broadcast_note(note_id, websocket, update)
+                await websocket.send_json({"type": "saved"})
+
+            else:
+                await websocket.close(code=1003)
+                return
+    except (WebSocketDisconnect, OSError):
+        pass
+    finally:
+        peers.discard(websocket)
+        if not peers:
+            note_clients.pop(note_id, None)

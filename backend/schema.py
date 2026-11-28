@@ -84,3 +84,18 @@ class MaterialRead(BaseModel):
 
 class MaterialListItem(MaterialRead):
     author_name: str | None
+
+class NoteCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(min_length=1)
+
+
+class NoteRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    group_id: int
+    author_id: int
+    title: str
+    created_at: datetime
